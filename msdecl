@@ -1,0 +1,647 @@
+#!/usr/bin/env lua
+
+local function smartrequire(s)
+   local savedpath=package.path
+   local thisfile=debug.getinfo(2).source
+   if type(thisfile)=='string' and thisfile:find('^@') then
+      local thisdir=thisfile:gsub('^@',''):gsub('[^/]*$','')
+      package.path=thisdir..'?.lua;'..package.path
+   end
+   local r = require(s)
+   package.path = savedpath
+   return r
+end
+
+cparser = smartrequire 'cparser'
+io = require 'io'
+
+function dequalify(x)
+   if x.tag and x.tag == 'Qualified' then
+      return x.t
+   else
+      return x
+   end
+end
+
+function extractDeclarationsFromHeader(header, options, decls)
+   local li = cparser.declarationIterator(options, io.lines(header), header)
+   decls = decls or {}
+   for action in li do
+      if action.tag == 'Declaration' and dequalify(action.type).tag == 'Function' then
+         decls[action.name] = action
+      end
+   end
+   return decls
+end
+
+function encode(ty)
+   if ty.ellipsis then
+      return "..."
+   end
+   ty = dequalify(ty)
+   if ty.tag == 'Type' then
+      if ty.n == 'char' then
+         return 'c'
+      elseif ty.n == 'int' then
+         return 'i'
+      elseif ty.n == 'short int' then
+         return 's'
+      elseif ty.n == 'long int' then
+         return 'l'
+      elseif ty.n == 'long long int' then
+         return 'q'
+      elseif ty.n == 'unsigned char' then
+         return 'C'
+      elseif ty.n == 'unsigned int' then
+         return 'I'
+      elseif ty.n == 'unsigned short int' then
+         return 'S'
+      elseif ty.n == 'unsigned long int' then
+         return 'L'
+      elseif ty.n == 'unsigned long long int' then
+         return 'Q'
+      elseif ty.n == 'float' then
+         return 'f'
+      elseif ty.n == 'double' then
+         return 'd'
+      elseif ty.n == 'long double' then
+         return 'D'
+      elseif ty.n == 'BOOL' or ty.n == '_Bool' or ty.n == 'bool' then
+         return 'B'
+      elseif ty.n == 'void' then
+         return 'v'
+      elseif ty.n == 'id' then
+         return '@'
+      elseif ty.n == 'Class' then
+         return '#'
+      elseif ty.n == 'SEL' then
+         return ':'
+      elseif ty.n:sub(1, 7) == 'struct ' then
+         -- this should only happen in pointers to opaque structs
+         return '{' .. ty.n:sub(8) .. '=}'
+      elseif ty._def then
+         return encode(ty._def)
+      else
+         error('unknown type ' .. ty.n)
+      end
+   elseif ty.tag == 'Pointer' then
+      local pointed = dequalify(ty.t)
+      if pointed.tag == 'Type' and pointed.n == 'char' then
+            return '*'
+      elseif pointed.tag == 'Function' then
+         return '?'
+      elseif pointed.tag == 'Type' or pointed.tag == 'Struct' then
+         --print("encoding pointed " .. tostring(pointed))
+         local mp = encode(pointed)
+         if mp == '{objc_object=}' then
+            return '@'
+         else
+            return '^' .. mp
+         end
+      else
+         return '?'
+      end
+   elseif ty.tag == 'Struct' then
+      local ms = '{'
+      if ty.n then
+         ms = ms .. ty.n .. '='
+      else
+         ms = ms .. '?='
+      end
+      for n, member in ipairs(ty) do
+         ms = ms .. encode(member[1])
+      end
+      return ms .. '}'
+   elseif ty.tag == 'Enum' then
+      -- int?
+      return 'i'
+   else
+      error("can't encode " .. ty.tag .. ": " .. cparser.typeToString(ty, ''))
+   end
+end
+
+function declToMethodSignature(decl)
+   assert(type(decl)=='table')
+   assert(decl.tag=='Declaration')
+   local func = dequalify(decl.type)
+   assert(func.tag=='Function')
+   
+   local ms = encode(func.t)
+   for n, arg in ipairs(func) do
+      ms = ms .. encode(arg[1] or arg)
+   end
+   
+   return ms
+end
+
+local function die(s,...)
+   if s then print(string.format(s,...)) end
+   error(nil)
+end
+
+local function usage()
+   die([[
+Usage: msdecl [options] library.dylib header1.h [header2.h ...]
+Main options:
+  -Idirname        : Add dirname to the include search path
+  -I-              : Marks beginning of system include search path
+  -Dsym[=value]    : Define a macro symbol
+  -Usym            : Undefine a macro symbol
+  -Tsym            : Declare that symbol is a type
+  -Zcppdef         : Extracts initial macro definitions from cpp
+  -std=xxx         : Select C dialect (c89,c99,c11,gnu89,gnu99,gnu11)
+]])
+end
+
+local libpath
+local headers = {}
+local options = {}
+
+function canReadFile(h)
+   local fp = io.open(h)
+   if fp == nil then
+      return false
+   else
+      io.close(fp)
+      return true
+   end
+end
+
+for i,v in ipairs{...} do
+   if v == '-h' or v == '--help' then
+      usage()
+   elseif v:find("^-[wIDUTZ]") or v:find("^-std=") then
+      -- pass through
+      options[1+#options] = v
+   elseif v:find("^-") == nil and not libpath then
+      if canReadFile(v) then
+         libpath = v
+      else
+         die("Can't read library: " .. v)
+      end
+   elseif canReadFile(v) then
+      headers[1+#headers] = v
+   else
+      print("Can't read header: " .. v)
+   end
+end
+
+local function readSymbolsFromLibrary(libpath)
+   local symbols = {}
+   local nm = io.popen(('nm -g -U %q'):format(libpath))
+   while true do
+      local line = nm:read('*line')
+      if line == nil then break end
+      local addr, type, sym = line:match("^(%x+) ([T]) (%g+)$")
+      if addr then
+         symbols[1+#symbols] = sym
+      end
+   end
+   return symbols
+end
+
+local function readSymbolsFromTBD(libpath)
+   fp = io.open(libpath)
+   tbds = {require('yaml').load(fp:read('*all'))}
+   fp:close()
+   
+   local symbols = {}
+   for h,tbd in ipairs(tbds) do
+      -- tbd['install-name']
+      for i,export in ipairs(tbd.exports) do
+         for j,arch in ipairs(export.archs) do
+            if arch == 'arm64' and export.symbols then
+               for k,sym in ipairs(export.symbols) do
+                  -- can't tell if symbol is a function or data
+                  symbols[1+#symbols] = sym
+               end
+            end
+         end
+      end
+   end
+   return symbols
+end
+
+local function readSymbols(libpath)
+   if libpath:find("%.tbd$") then
+      return readSymbolsFromTBD(libpath)
+   else
+      return readSymbolsFromLibrary(libpath)
+   end
+end
+
+-- read symbols from library
+local symbols = readSymbols(libpath)
+
+-- insert defines
+local defines = {
+   'IB_DESIGNABLE',
+   'OBJC_NEW_PROPERTIES=1',
+   'OBJC_OLD_DISPATCH_PROTOTYPES=0',
+   'OBJC_ZEROCOST_EXCEPTIONS=1',
+   '_LP64=1',
+   '__AARCH64EL__=1',
+   '__AARCH64_SIMD__=1',
+   '__APPLE_CC__=6000',
+   '__APPLE__=1',
+   '__ARM64_ARCH_8__=1',
+   '__ARM_64BIT_STATE=1',
+   '__ARM_ACLE=200',
+   '__ARM_ALIGN_MAX_STACK_PWR=4',
+   '__ARM_ARCH=8',
+   '__ARM_ARCH_ISA_A64=1',
+   "__ARM_ARCH_PROFILE='A'",
+   '__ARM_FEATURE_CLZ=1',
+   '__ARM_FEATURE_CRYPTO=1',
+   '__ARM_FEATURE_DIRECTED_ROUNDING=1',
+   '__ARM_FEATURE_DIV=1',
+   '__ARM_FEATURE_FMA=1',
+   '__ARM_FEATURE_IDIV=1',
+   '__ARM_FEATURE_LDREX=0xF',
+   '__ARM_FEATURE_NUMERIC_MAXMIN=1',
+   '__ARM_FEATURE_UNALIGNED=1',
+   '__ARM_FP=0xE',
+   '__ARM_FP16_ARGS=1',
+   '__ARM_FP16_FORMAT_IEEE=1',
+   '__ARM_NEON=1',
+   '__ARM_NEON_FP=0xE',
+   '__ARM_NEON__=1',
+   '__ARM_PCS_AAPCS64=1',
+   '__ARM_SIZEOF_MINIMAL_ENUM=4',
+   '__ARM_SIZEOF_WCHAR_T=4',
+   '__ATOMIC_ACQUIRE=2',
+   '__ATOMIC_ACQ_REL=4',
+   '__ATOMIC_CONSUME=1',
+   '__ATOMIC_RELAXED=0',
+   '__ATOMIC_RELEASE=3',
+   '__ATOMIC_SEQ_CST=5',
+   '__BIGGEST_ALIGNMENT__=8',
+   '__BLOCKS__=1',
+   '__BYTE_ORDER__=__ORDER_LITTLE_ENDIAN__',
+   '__CHAR16_TYPE__=unsigned short',
+   '__CHAR32_TYPE__=unsigned int',
+   '__CHAR_BIT__=8',
+   '__CLANG_ATOMIC_BOOL_LOCK_FREE=2',
+   '__CLANG_ATOMIC_CHAR16_T_LOCK_FREE=2',
+   '__CLANG_ATOMIC_CHAR32_T_LOCK_FREE=2',
+   '__CLANG_ATOMIC_CHAR_LOCK_FREE=2',
+   '__CLANG_ATOMIC_INT_LOCK_FREE=2',
+   '__CLANG_ATOMIC_LLONG_LOCK_FREE=2',
+   '__CLANG_ATOMIC_LONG_LOCK_FREE=2',
+   '__CLANG_ATOMIC_POINTER_LOCK_FREE=2',
+   '__CLANG_ATOMIC_SHORT_LOCK_FREE=2',
+   '__CLANG_ATOMIC_WCHAR_T_LOCK_FREE=2',
+   '__CONSTANT_CFSTRINGS__=1',
+   '__DBL_DECIMAL_DIG__=17',
+   '__DBL_DENORM_MIN__=4.9406564584124654e-324',
+   '__DBL_DIG__=15',
+   '__DBL_EPSILON__=2.2204460492503131e-16',
+   '__DBL_HAS_DENORM__=1',
+   '__DBL_HAS_INFINITY__=1',
+   '__DBL_HAS_QUIET_NAN__=1',
+   '__DBL_MANT_DIG__=53',
+   '__DBL_MAX_10_EXP__=308',
+   '__DBL_MAX_EXP__=1024',
+   '__DBL_MAX__=1.7976931348623157e+308',
+   '__DBL_MIN_10_EXP__=(-307)',
+   '__DBL_MIN_EXP__=(-1021)',
+   '__DBL_MIN__=2.2250738585072014e-308',
+   '__DECIMAL_DIG__=__LDBL_DECIMAL_DIG__',
+   '__DYNAMIC__=1',
+   '__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__=120100',
+   '__EXCEPTIONS=1',
+   '__FINITE_MATH_ONLY__=0',
+   '__FLT16_DECIMAL_DIG__=5',
+   '__FLT16_DENORM_MIN__=5.9604644775390625e-8F16',
+   '__FLT16_DIG__=3',
+   '__FLT16_EPSILON__=9.765625e-4F16',
+   '__FLT16_HAS_DENORM__=1',
+   '__FLT16_HAS_INFINITY__=1',
+   '__FLT16_HAS_QUIET_NAN__=1',
+   '__FLT16_MANT_DIG__=11',
+   '__FLT16_MAX_10_EXP__=4',
+   '__FLT16_MAX_EXP__=15',
+   '__FLT16_MAX__=6.5504e+4F16',
+   '__FLT16_MIN_10_EXP__=(-13)',
+   '__FLT16_MIN_EXP__=(-14)',
+   '__FLT16_MIN__=6.103515625e-5F16',
+   '__FLT_DECIMAL_DIG__=9',
+   '__FLT_DENORM_MIN__=1.40129846e-45F',
+   '__FLT_DIG__=6',
+   '__FLT_EPSILON__=1.19209290e-7F',
+   '__FLT_EVAL_METHOD__=0',
+   '__FLT_HAS_DENORM__=1',
+   '__FLT_HAS_INFINITY__=1',
+   '__FLT_HAS_QUIET_NAN__=1',
+   '__FLT_MANT_DIG__=24',
+   '__FLT_MAX_10_EXP__=38',
+   '__FLT_MAX_EXP__=128',
+   '__FLT_MAX__=3.40282347e+38F',
+   '__FLT_MIN_10_EXP__=(-37)',
+   '__FLT_MIN_EXP__=(-125)',
+   '__FLT_MIN__=1.17549435e-38F',
+   '__FLT_RADIX__=2',
+   '__GCC_ATOMIC_BOOL_LOCK_FREE=2',
+   '__GCC_ATOMIC_CHAR16_T_LOCK_FREE=2',
+   '__GCC_ATOMIC_CHAR32_T_LOCK_FREE=2',
+   '__GCC_ATOMIC_CHAR_LOCK_FREE=2',
+   '__GCC_ATOMIC_INT_LOCK_FREE=2',
+   '__GCC_ATOMIC_LLONG_LOCK_FREE=2',
+   '__GCC_ATOMIC_LONG_LOCK_FREE=2',
+   '__GCC_ATOMIC_POINTER_LOCK_FREE=2',
+   '__GCC_ATOMIC_SHORT_LOCK_FREE=2',
+   '__GCC_ATOMIC_TEST_AND_SET_TRUEVAL=1',
+   '__GCC_ATOMIC_WCHAR_T_LOCK_FREE=2',
+   '__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1=1',
+   '__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2=1',
+   '__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4=1',
+   '__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8=1',
+   '__GNUC_MINOR__=2',
+   '__GNUC_PATCHLEVEL__=1',
+   '__GNUC_STDC_INLINE__=1',
+   '__GNUC__=4',
+   '__GXX_ABI_VERSION=1002',
+   '__INT16_C_SUFFIX__=',
+   '__INT16_FMTd__="hd"',
+   '__INT16_FMTi__="hi"',
+   '__INT16_MAX__=32767',
+   '__INT16_TYPE__=short',
+   '__INT32_C_SUFFIX__=',
+   '__INT32_FMTd__="d"',
+   '__INT32_FMTi__="i"',
+   '__INT32_MAX__=2147483647',
+   '__INT32_TYPE__=int',
+   '__INT64_C_SUFFIX__=LL',
+   '__INT64_FMTd__="lld"',
+   '__INT64_FMTi__="lli"',
+   '__INT64_MAX__=9223372036854775807LL',
+   '__INT64_TYPE__=long long int',
+   '__INT8_C_SUFFIX__=',
+   '__INT8_FMTd__="hhd"',
+   '__INT8_FMTi__="hhi"',
+   '__INT8_MAX__=127',
+   '__INT8_TYPE__=signed char',
+   '__INTMAX_C_SUFFIX__=L',
+   '__INTMAX_FMTd__="ld"',
+   '__INTMAX_FMTi__="li"',
+   '__INTMAX_MAX__=9223372036854775807L',
+   '__INTMAX_TYPE__=long int',
+   '__INTMAX_WIDTH__=64',
+   '__INTPTR_FMTd__="ld"',
+   '__INTPTR_FMTi__="li"',
+   '__INTPTR_MAX__=9223372036854775807L',
+   '__INTPTR_TYPE__=long int',
+   '__INTPTR_WIDTH__=64',
+   '__INT_FAST16_FMTd__="hd"',
+   '__INT_FAST16_FMTi__="hi"',
+   '__INT_FAST16_MAX__=32767',
+   '__INT_FAST16_TYPE__=short',
+   '__INT_FAST32_FMTd__="d"',
+   '__INT_FAST32_FMTi__="i"',
+   '__INT_FAST32_MAX__=2147483647',
+   '__INT_FAST32_TYPE__=int',
+   '__INT_FAST64_FMTd__="ld"',
+   '__INT_FAST64_FMTi__="li"',
+   '__INT_FAST64_MAX__=9223372036854775807L',
+   '__INT_FAST64_TYPE__=long int',
+   '__INT_FAST8_FMTd__="hhd"',
+   '__INT_FAST8_FMTi__="hhi"',
+   '__INT_FAST8_MAX__=127',
+   '__INT_FAST8_TYPE__=signed char',
+   '__INT_LEAST16_FMTd__="hd"',
+   '__INT_LEAST16_FMTi__="hi"',
+   '__INT_LEAST16_MAX__=32767',
+   '__INT_LEAST16_TYPE__=short',
+   '__INT_LEAST32_FMTd__="d"',
+   '__INT_LEAST32_FMTi__="i"',
+   '__INT_LEAST32_MAX__=2147483647',
+   '__INT_LEAST32_TYPE__=int',
+   '__INT_LEAST64_FMTd__="ld"',
+   '__INT_LEAST64_FMTi__="li"',
+   '__INT_LEAST64_MAX__=9223372036854775807L',
+   '__INT_LEAST64_TYPE__=long int',
+   '__INT_LEAST8_FMTd__="hhd"',
+   '__INT_LEAST8_FMTi__="hhi"',
+   '__INT_LEAST8_MAX__=127',
+   '__INT_LEAST8_TYPE__=signed char',
+   '__INT_MAX__=2147483647',
+   '__LDBL_DECIMAL_DIG__=17',
+   '__LDBL_DENORM_MIN__=4.9406564584124654e-324L',
+   '__LDBL_DIG__=15',
+   '__LDBL_EPSILON__=2.2204460492503131e-16L',
+   '__LDBL_HAS_DENORM__=1',
+   '__LDBL_HAS_INFINITY__=1',
+   '__LDBL_HAS_QUIET_NAN__=1',
+   '__LDBL_MANT_DIG__=53',
+   '__LDBL_MAX_10_EXP__=308',
+   '__LDBL_MAX_EXP__=1024',
+   '__LDBL_MAX__=1.7976931348623157e+308L',
+   '__LDBL_MIN_10_EXP__=(-307)',
+   '__LDBL_MIN_EXP__=(-1021)',
+   '__LDBL_MIN__=2.2250738585072014e-308L',
+   '__LITTLE_ENDIAN__=1',
+   '__LONG_LONG_MAX__=9223372036854775807LL',
+   '__LONG_MAX__=9223372036854775807L',
+   '__LP64__=1',
+   '__MACH__=1',
+   '__NEXT_RUNTIME__=1',
+   '__NO_INLINE__=1',
+   '__OBJC2__=1',
+   '__OBJC_BOOL_IS_BOOL=1',
+   --'__OBJC__=1',
+   '__OPENCL_MEMORY_SCOPE_ALL_SVM_DEVICES=3',
+   '__OPENCL_MEMORY_SCOPE_DEVICE=2',
+   '__OPENCL_MEMORY_SCOPE_SUB_GROUP=4',
+   '__OPENCL_MEMORY_SCOPE_WORK_GROUP=1',
+   '__OPENCL_MEMORY_SCOPE_WORK_ITEM=0',
+   '__ORDER_BIG_ENDIAN__=4321',
+   '__ORDER_LITTLE_ENDIAN__=1234',
+   '__ORDER_PDP_ENDIAN__=3412',
+   '__PASCAL_STRINGS__=1',
+   '__PIC__=2',
+   '__POINTER_WIDTH__=64',
+   '__PRAGMA_REDEFINE_EXTNAME=1',
+   '__PTRDIFF_FMTd__="ld"',
+   '__PTRDIFF_FMTi__="li"',
+   '__PTRDIFF_MAX__=9223372036854775807L',
+   '__PTRDIFF_TYPE__=long int',
+   '__PTRDIFF_WIDTH__=64',
+   '__REGISTER_PREFIX__=',
+   '__SCHAR_MAX__=127',
+   '__SHRT_MAX__=32767',
+   '__SIG_ATOMIC_MAX__=2147483647',
+   '__SIG_ATOMIC_WIDTH__=32',
+   '__SIZEOF_DOUBLE__=8',
+   '__SIZEOF_FLOAT__=4',
+   '__SIZEOF_INT128__=16',
+   '__SIZEOF_INT__=4',
+   '__SIZEOF_LONG_DOUBLE__=8',
+   '__SIZEOF_LONG_LONG__=8',
+   '__SIZEOF_LONG__=8',
+   '__SIZEOF_POINTER__=8',
+   '__SIZEOF_PTRDIFF_T__=8',
+   '__SIZEOF_SHORT__=2',
+   '__SIZEOF_SIZE_T__=8',
+   '__SIZEOF_WCHAR_T__=4',
+   '__SIZEOF_WINT_T__=4',
+   '__SIZE_FMTX__="lX"',
+   '__SIZE_FMTo__="lo"',
+   '__SIZE_FMTu__="lu"',
+   '__SIZE_FMTx__="lx"',
+   '__SIZE_MAX__=18446744073709551615UL',
+   '__SIZE_TYPE__=long unsigned int',
+   '__SIZE_WIDTH__=64',
+   '__SSP__=1',
+   '__STDC_HOSTED__=1',
+   '__STDC_NO_THREADS__=1',
+   '__STDC_UTF_16__=1',
+   '__STDC_UTF_32__=1',
+   '__STDC_VERSION__=201112L',
+   '__STDC__=1',
+   '__UINT16_C_SUFFIX__=',
+   '__UINT16_FMTX__="hX"',
+   '__UINT16_FMTo__="ho"',
+   '__UINT16_FMTu__="hu"',
+   '__UINT16_FMTx__="hx"',
+   '__UINT16_MAX__=65535',
+   '__UINT16_TYPE__=unsigned short',
+   '__UINT32_C_SUFFIX__=U',
+   '__UINT32_FMTX__="X"',
+   '__UINT32_FMTo__="o"',
+   '__UINT32_FMTu__="u"',
+   '__UINT32_FMTx__="x"',
+   '__UINT32_MAX__=4294967295U',
+   '__UINT32_TYPE__=unsigned int',
+   '__UINT64_C_SUFFIX__=ULL',
+   '__UINT64_FMTX__="llX"',
+   '__UINT64_FMTo__="llo"',
+   '__UINT64_FMTu__="llu"',
+   '__UINT64_FMTx__="llx"',
+   '__UINT64_MAX__=18446744073709551615ULL',
+   '__UINT64_TYPE__=long long unsigned int',
+   '__UINT8_C_SUFFIX__=',
+   '__UINT8_FMTX__="hhX"',
+   '__UINT8_FMTo__="hho"',
+   '__UINT8_FMTu__="hhu"',
+   '__UINT8_FMTx__="hhx"',
+   '__UINT8_MAX__=255',
+   '__UINT8_TYPE__=unsigned char',
+   '__UINTMAX_C_SUFFIX__=UL',
+   '__UINTMAX_FMTX__="lX"',
+   '__UINTMAX_FMTo__="lo"',
+   '__UINTMAX_FMTu__="lu"',
+   '__UINTMAX_FMTx__="lx"',
+   '__UINTMAX_MAX__=18446744073709551615UL',
+   '__UINTMAX_TYPE__=long unsigned int',
+   '__UINTMAX_WIDTH__=64',
+   '__UINTPTR_FMTX__="lX"',
+   '__UINTPTR_FMTo__="lo"',
+   '__UINTPTR_FMTu__="lu"',
+   '__UINTPTR_FMTx__="lx"',
+   '__UINTPTR_MAX__=18446744073709551615UL',
+   '__UINTPTR_TYPE__=long unsigned int',
+   '__UINTPTR_WIDTH__=64',
+   '__UINT_FAST16_FMTX__="hX"',
+   '__UINT_FAST16_FMTo__="ho"',
+   '__UINT_FAST16_FMTu__="hu"',
+   '__UINT_FAST16_FMTx__="hx"',
+   '__UINT_FAST16_MAX__=65535',
+   '__UINT_FAST16_TYPE__=unsigned short',
+   '__UINT_FAST32_FMTX__="X"',
+   '__UINT_FAST32_FMTo__="o"',
+   '__UINT_FAST32_FMTu__="u"',
+   '__UINT_FAST32_FMTx__="x"',
+   '__UINT_FAST32_MAX__=4294967295U',
+   '__UINT_FAST32_TYPE__=unsigned int',
+   '__UINT_FAST64_FMTX__="lX"',
+   '__UINT_FAST64_FMTo__="lo"',
+   '__UINT_FAST64_FMTu__="lu"',
+   '__UINT_FAST64_FMTx__="lx"',
+   '__UINT_FAST64_MAX__=18446744073709551615UL',
+   '__UINT_FAST64_TYPE__=long unsigned int',
+   '__UINT_FAST8_FMTX__="hhX"',
+   '__UINT_FAST8_FMTo__="hho"',
+   '__UINT_FAST8_FMTu__="hhu"',
+   '__UINT_FAST8_FMTx__="hhx"',
+   '__UINT_FAST8_MAX__=255',
+   '__UINT_FAST8_TYPE__=unsigned char',
+   '__UINT_LEAST16_FMTX__="hX"',
+   '__UINT_LEAST16_FMTo__="ho"',
+   '__UINT_LEAST16_FMTu__="hu"',
+   '__UINT_LEAST16_FMTx__="hx"',
+   '__UINT_LEAST16_MAX__=65535',
+   '__UINT_LEAST16_TYPE__=unsigned short',
+   '__UINT_LEAST32_FMTX__="X"',
+   '__UINT_LEAST32_FMTo__="o"',
+   '__UINT_LEAST32_FMTu__="u"',
+   '__UINT_LEAST32_FMTx__="x"',
+   '__UINT_LEAST32_MAX__=4294967295U',
+   '__UINT_LEAST32_TYPE__=unsigned int',
+   '__UINT_LEAST64_FMTX__="lX"',
+   '__UINT_LEAST64_FMTo__="lo"',
+   '__UINT_LEAST64_FMTu__="lu"',
+   '__UINT_LEAST64_FMTx__="lx"',
+   '__UINT_LEAST64_MAX__=18446744073709551615UL',
+   '__UINT_LEAST64_TYPE__=long unsigned int',
+   '__UINT_LEAST8_FMTX__="hhX"',
+   '__UINT_LEAST8_FMTo__="hho"',
+   '__UINT_LEAST8_FMTu__="hhu"',
+   '__UINT_LEAST8_FMTx__="hhx"',
+   '__UINT_LEAST8_MAX__=255',
+   '__UINT_LEAST8_TYPE__=unsigned char',
+   '__USER_LABEL_PREFIX__=_',
+   '__VERSION__="4.2.1 Compatible Apple LLVM 10.0.0 (clang-1000.11.45.5)"',
+   '__WCHAR_MAX__=2147483647',
+   '__WCHAR_TYPE__=int',
+   '__WCHAR_WIDTH__=32',
+   '__WINT_MAX__=2147483647',
+   '__WINT_TYPE__=int',
+   '__WINT_WIDTH__=32',
+   '__aarch64__=1',
+   '__apple_build_version__=10001145',
+   '__arm64=1',
+   '__arm64__=1',
+   '__autoreleasing=__attribute__((objc_ownership(autoreleasing)))',
+   '__block=__attribute__((__blocks__(byref)))',
+   '__clang__=1',
+   '__clang_major__=10',
+   '__clang_minor__=0',
+   '__clang_patchlevel__=0',
+   '__clang_version__="10.0.0 (clang-1000.11.45.5)"',
+   '__llvm__=1',
+   '__nonnull=_Nonnull',
+   '__null_unspecified=_Null_unspecified',
+   '__nullable=_Nullable',
+   '__pic__=2',
+   '__strong=__attribute__((objc_ownership(strong)))',
+   '__unsafe_unretained=__attribute__((objc_ownership(none)))',
+   '__weak=__attribute__((objc_ownership(weak)))',
+   'TARGET_CPU_ARM64=1',
+   'TARGET_OS_IPHONE=1',
+   'OBJC_OLD_DISPATCH_PROTOTYPES=1',
+   -- hacks
+   '__has_include(x)=0',
+   '__typeof(x)=void*',
+   'API_AVAILABLE(...)=',
+   'OS_SWIFT_UNAVAILABLE(...)='
+}
+for i,def in ipairs(defines) do
+   options[1+#options] = '-D' .. def
+end
+
+-- read headers
+local decls = {}
+for i,hp in ipairs(headers) do
+   decls = extractDeclarationsFromHeader(hp, options, decls)
+end
+
+-- print result
+for i,sym in ipairs(symbols) do
+   local name = sym:sub(2)
+   local decl = decls[name]
+   if decl == nil then
+      print("// decl for " .. name .. ' not found')
+   else
+      print('"' .. name .. '" = "' .. declToMethodSignature(decl) .. '";')
+   end
+end
