@@ -108,10 +108,18 @@ function encode(ty)
       else
          ms = ms .. '?='
       end
-      for n, member in ipairs(ty) do
-         ms = ms .. encode(member[1])
+      function encodeStructMembers(ty, ms)
+         for n, member in ipairs(ty) do
+            ms = ms .. encode(member[1])
+         end
+         return ms
       end
-      return ms .. '}'
+      local success, retval = pcall(encodeStructMembers, ty, ms)
+      if success then
+         return retval .. '}'
+      else
+         return ms .. '}'
+      end
    elseif ty.tag == 'Enum' then
       -- int?
       return 'i'
