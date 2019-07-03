@@ -627,11 +627,29 @@ local defines = {
    'TARGET_CPU_ARM64=1',
    'TARGET_OS_IPHONE=1',
    'OBJC_OLD_DISPATCH_PROTOTYPES=1',
+   'OS_OBJECT_USE_OBJC=0',
+   '_USE_EXTENDED_LOCALES_',
    -- hacks
    '__has_include(x)=0',
    '__typeof(x)=void*',
    'API_AVAILABLE(...)=',
-   'OS_SWIFT_UNAVAILABLE(...)='
+   'API_DEPRECATED(...)=',
+   '__OSX_AVAILABLE(...)=',
+   '__IOS_AVAILABLE(...)=',
+   '__WATCHOS_AVAILABLE(...)=',
+   '__TVOS_AVAILABLE(...)=',
+   '__OSX_AVAILABLE_STARTING(...)=',
+   '__IOS_AVAILABLE_STARTING(...)=',
+   '__WATCHOS_AVAILABLE_STARTING(...)=',
+   '__TVOS_AVAILABLE_STARTING(...)=',
+   'OS_SWIFT_UNAVAILABLE(...)=',
+   '__signed=signed',
+   '_DONT_USE_CTYPE_INLINE_',
+   '__DARWIN_C_LEVEL=900000L',
+   'restrict=',
+   '_REENTRANT',
+   '__BEGIN_DECLS=',
+   '__END_DECLS='
 }
 for i,def in ipairs(defines) do
    options[1+#options] = '-D' .. def
