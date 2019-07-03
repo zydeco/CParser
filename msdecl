@@ -42,11 +42,11 @@ function encode(ty)
    if ty.tag == 'Type' then
       if ty.n == 'char' then
          return 'c'
-      elseif ty.n == 'int' then
+      elseif ty.n == 'int' or ty.n == 'signed int' then
          return 'i'
-      elseif ty.n == 'short int' then
+      elseif ty.n == 'short int' or ty.n == 'signed short int' then
          return 's'
-      elseif ty.n == 'long int' then
+      elseif ty.n == 'long int' or ty.n == 'signed long int' then
          return 'l'
       elseif ty.n == 'long long int' then
          return 'q'
@@ -81,6 +81,8 @@ function encode(ty)
          return '{' .. ty.n:sub(8) .. '=}'
       elseif ty._def then
          return encode(ty._def)
+      elseif ty.n == 'va_list' or ty.n == '__builtin_va_list' then
+         return '...'
       else
          error('unknown type ' .. ty.n)
       end
@@ -123,6 +125,30 @@ function encode(ty)
    elseif ty.tag == 'Enum' then
       -- int?
       return 'i'
+   elseif ty.tag == 'Union' then
+      -- see if everything is a pointer
+      local allMembersArePointers = true
+      local unionDef = cparser.typeToString(ty, '')
+      for n, member in ipairs(ty) do
+         if member[1].tag ~= 'Pointer' then
+            allMembersArePointers = false
+         end
+      end
+      if allMembersArePointers then
+         return '?' -- pointer
+      elseif unionDef == 'union{char __mbstate8[128];long long int _mbstateL;}' then
+         return '{mbstate_t=}'
+      elseif unionDef == 'union _TXTRecordRef_t{char PrivateData[16];char*ForceNaturalAlignment;}' then
+         return '{TXTRecordRef=}'
+      elseif unionDef == 'union des_block{struct{u_int32 high;u_int32 low;}key;char c[8];}' then
+         return '{des_block=}'
+      else
+         error("can't encode union: " .. cparser.typeToString(ty, ''))
+      end
+   elseif ty.tag == 'Array' then
+      return '[' .. ty.size .. encode(ty.t) .. ']'
+   elseif ty.tag == 'Function' then
+      return '?'
    else
       error("can't encode " .. ty.tag .. ": " .. cparser.typeToString(ty, ''))
    end
