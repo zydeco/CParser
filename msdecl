@@ -76,11 +76,11 @@ function encode(ty)
          return '#'
       elseif ty.n == 'SEL' then
          return ':'
+      elseif ty._def then
+         return encode(ty._def)
       elseif ty.n:sub(1, 7) == 'struct ' then
          -- this should only happen in pointers to opaque structs
          return '{' .. ty.n:sub(8) .. '=}'
-      elseif ty._def then
-         return encode(ty._def)
       elseif ty.n == 'va_list' or ty.n == '__builtin_va_list' then
          return '...'
       else
