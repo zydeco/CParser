@@ -91,7 +91,7 @@ function encode(ty)
       if pointed.tag == 'Type' and pointed.n == 'char' then
             return '*'
       elseif pointed.tag == 'Function' then
-         return '?'
+         return '^?'
       elseif pointed.tag == 'Type' or pointed.tag == 'Struct' then
          --print("encoding pointed " .. tostring(pointed))
          local mp = encode(pointed)
@@ -101,7 +101,7 @@ function encode(ty)
             return '^' .. mp
          end
       else
-         return '?'
+         return '^?'
       end
    elseif ty.tag == 'Struct' then
       local ms = '{'
@@ -135,7 +135,7 @@ function encode(ty)
          end
       end
       if allMembersArePointers then
-         return '?' -- pointer
+         return '^?' -- pointer
       elseif unionDef == 'union{char __mbstate8[128];long long int _mbstateL;}' then
          return '{mbstate_t=}'
       elseif unionDef == 'union _TXTRecordRef_t{char PrivateData[16];char*ForceNaturalAlignment;}' then
@@ -148,7 +148,7 @@ function encode(ty)
    elseif ty.tag == 'Array' then
       return '[' .. ty.size .. encode(ty.t) .. ']'
    elseif ty.tag == 'Function' then
-      return '?'
+      return '^?'
    else
       error("can't encode " .. ty.tag .. ": " .. cparser.typeToString(ty, ''))
    end
