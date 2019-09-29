@@ -40,15 +40,13 @@ function encode(ty)
    end
    ty = dequalify(ty)
    if ty.tag == 'Type' then
-      if ty.n == 'char' then
+      if ty.n == 'char' or ty.n == 'BOOL' then
          return 'c'
       elseif ty.n == 'int' or ty.n == 'signed int' then
          return 'i'
       elseif ty.n == 'short int' or ty.n == 'signed short int' then
          return 's'
-      elseif ty.n == 'long int' or ty.n == 'signed long int' then
-         return 'l'
-      elseif ty.n == 'long long int' then
+      elseif ty.n == 'long int' or ty.n == 'signed long int' or ty.n == 'long long int' then
          return 'q'
       elseif ty.n == 'unsigned char' then
          return 'C'
@@ -56,9 +54,7 @@ function encode(ty)
          return 'I'
       elseif ty.n == 'unsigned short int' then
          return 'S'
-      elseif ty.n == 'unsigned long int' then
-         return 'L'
-      elseif ty.n == 'unsigned long long int' then
+      elseif ty.n == 'unsigned long int' or ty.n == 'unsigned long long int' then
          return 'Q'
       elseif ty.n == 'float' then
          return 'f'
@@ -66,7 +62,7 @@ function encode(ty)
          return 'd'
       elseif ty.n == 'long double' then
          return 'D'
-      elseif ty.n == 'BOOL' or ty.n == '_Bool' or ty.n == 'bool' then
+      elseif ty.n == '_Bool' or ty.n == 'bool' then
          return 'B'
       elseif ty.n == 'void' then
          return 'v'
@@ -659,6 +655,7 @@ local defines = {
    '__has_include(x)=0',
    '__typeof(x)=void*',
    'API_AVAILABLE(...)=',
+   'API_UNAVAILABLE(...)=',
    'API_DEPRECATED(...)=',
    '__OSX_AVAILABLE(...)=',
    '__IOS_AVAILABLE(...)=',
